@@ -19,6 +19,7 @@ mod memory;
 use rboot::BootInfo;
 
 pub use memory::{hal_frame_alloc, hal_frame_dealloc, hal_pt_map_kernel};
+use rcore_thread::asynchronous::executor;
 use zircon_loader::{run_userboot, Images};
 
 #[no_mangle]

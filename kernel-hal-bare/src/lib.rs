@@ -38,6 +38,7 @@ use kernel_hal::defs::*;
 use kernel_hal::vdso::*;
 use kernel_hal::UserContext;
 use naive_timer::Timer;
+use rcore_thread::asynchronous::executor;
 use spin::Mutex;
 
 pub mod arch;
