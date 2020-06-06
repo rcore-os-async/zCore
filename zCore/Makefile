@@ -1,6 +1,6 @@
 arch ?= x86_64
 mode ?= debug
-LOG ?=
+LOG ?= debug
 zbi_file ?= bringup
 graphic ?=
 accel ?=
@@ -19,7 +19,8 @@ ifeq ($(mode), release)
 endif
 
 qemu_opts := \
-	-smp cores=1
+    -S -s \
+	-smp cores=2
 
 ifeq ($(arch), x86_64)
 qemu_opts += \

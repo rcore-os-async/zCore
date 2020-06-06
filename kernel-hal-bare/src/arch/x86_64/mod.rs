@@ -343,6 +343,17 @@ pub fn init(config: Config) {
     }
 }
 
+pub fn init_ap() {
+    timer_init();
+    unsafe {
+        Cr4::update(|f| f.insert(Cr4Flags::PAGE_GLOBAL));
+    }
+}
+
+pub fn wakeup_all_ap() {
+    interrupt::wakeup_all_ap();
+}
+
 /// Configuration of HAL.
 pub struct Config {
     pub acpi_rsdp: u64,
@@ -358,6 +369,194 @@ pub fn fetch_fault_vaddr() -> VirtAddr {
 #[export_name = "hal_pc_firmware_tables"]
 pub fn pc_firmware_tables() -> (u64, u64) {
     unsafe { (CONFIG.acpi_rsdp, CONFIG.smbios) }
+}
+
+// AP trampoline memory layout:
+// 0x5000: trampoline entry
+// 0x6000: real mode code
+// 0x7010: page table address
+// 0x7020: kernel stack base
+// 0x7030: kernel stack size for each core
+// 0x7040: core ticket
+// 0x7052: GDT pointer
+// 0x7060: debug stepper
+// 0x7090: tmp sp
+// 0x70A0: jump addr seg
+// 0x70A4: jump addr seg
+// 0x8000: long mode code
+// 0x9000: GDT
+global_asm!("
+  .section .data, \"ax\", %progbits
+  .code16
+_ap_boot_entry:
+  ljmp $0,$0x6000
+_ap_boot_entry_end:
+
+  .section .data, \"ax\", %progbits
+  .code16
+_ap_boot_16:
+  cli
+  xorw %ax, %ax
+  movw %ax, %ds
+  movw %ax, %es
+  movw %ax, %ss
+  movw %ax, %fs
+  movw %ax, %gs
+
+  movw $0x7090, %sp
+  cld
+
+  movl $0x0, [0x7060]
+
+  # Disable IRQs
+  mov $0xFF, %al
+  outb %al, $0xA1
+  outb %al, $0x21
+
+  nop
+  nop
+
+  # Enter long mode
+  mov $0b10100000, %eax
+  movl %eax, %cr4
+
+  movl $0x1, [0x7060]
+
+  # Setup paging
+  movl [0x7010], %eax
+  movl %eax, %cr3
+
+  movl $0x2, [0x7060]
+
+  # Set LME
+  movl 0xC0000080, %ecx
+  rdmsr
+  orl 1 << 8, %eax
+  wrmsr
+
+  movl $0x3, [0x7060]
+
+  # 64-bit submode gdt
+  lgdt [0x7052]
+
+  movl $0x4, [0x7060]
+
+  movl $0x8, [0x70A0]
+  movl $0x8000, [0x70A4]
+
+  movl $0x5, [0x7060]
+
+  # Activate long mode
+  movl %cr0, %eax
+  orl $0x80000001, %eax
+  movl %eax, %cr0
+
+  ljmp *(0x70A0)
+_ap_boot_16_end:
+
+.code64
+_ap_boot_64:
+  # Setup DS
+  nop
+  movq $0x10, %rax
+  movq %rax, %ds
+  movq %rax, %es
+  movq %rax, %fs
+  movq %rax, %gs
+  movq %rax, %ss
+
+  movl $0x7, [0x7060]
+
+  # Setup stack
+  lock; xaddq %rax, [0x7040]
+  addq $1, %rax
+  movq [0x7030], %rbx
+  mulq %rbx
+  shlq $12, %rax
+  movq [0x7020], %rbx
+  addq %rbx, %rax
+  movq  %rax, %rsp
+
+  movl $0x8, [0x7060]
+
+  call _ap_start
+
+_ap_boot_64_end:
+
+GDT64:                                # Global Descriptor Table (64-bit).
+    .quad 0x0000000000000000          # Null Descriptor - should be present.
+    .quad 0x00209A0000000000          # 64-bit code descriptor (exec/read).
+    .quad 0x0000920000000000          # 64-bit data descriptor (read/write).
+
+GDT64_end:
+");
+
+pub fn start_aps() {
+    extern "C" {
+        fn _ap_boot_entry();
+        fn _ap_boot_entry_end();
+
+        fn _ap_boot_16();
+        fn _ap_boot_16_end();
+
+        fn _ap_boot_64();
+        fn _ap_boot_64_end();
+
+        fn GDT64();
+        fn GDT64_end();
+    }
+
+    // Map zero page
+    let mut pt = PageTableImpl::current();
+    let mut pt = pt.get();
+    let query = pt.translate(x86_64::VirtAddr::new(0));
+    info!("Original: {:?}", query);
+    unsafe {
+        let page = Page::<Size2MiB>::from_start_address(x86_64::VirtAddr::new(0)).unwrap();
+        pt.update_flags(page, (MMUFlags::READ | MMUFlags::WRITE | MMUFlags::EXECUTE).to_ptf() | PTF::HUGE_PAGE).unwrap().flush();
+    }
+
+    info!("0x6000: {:?}", pt.translate(x86_64::VirtAddr::new(0x6000)));
+
+    let len_entry = _ap_boot_entry_end as usize - _ap_boot_entry as usize;
+    let start_entry = _ap_boot_entry as *const u8;
+    let len_16 = _ap_boot_16_end as usize - _ap_boot_16 as usize;
+    let start_16 = _ap_boot_16 as *const u8;
+    let len_64 = _ap_boot_64_end as usize - _ap_boot_64 as usize;
+    let start_64 = _ap_boot_64 as *const u8;
+    let len_gdt= GDT64_end as usize - GDT64 as usize;
+    let start_gdt= GDT64 as *const u8;
+    unsafe {
+        info!("Copying trampoline entry...");
+        core::ptr::copy_nonoverlapping(start_entry, 0x5000 as *mut u8, len_entry);
+        info!("Copying real mode code...");
+        core::ptr::copy_nonoverlapping(start_16, 0x6000 as *mut u8, len_16);
+        info!("Copying long mode code...");
+        core::ptr::copy_nonoverlapping(start_64, 0x8000 as *mut u8, len_64);
+        info!("Copying GDT content...");
+        core::ptr::copy_nonoverlapping(start_gdt, 0x9000 as *mut u8, len_gdt);
+    }
+
+    let cr3: u64;
+    unsafe { llvm_asm!("mov %cr3, $0" : "=r" (cr3)) };
+    unsafe {
+        info!("Writing CR3 template...: 0x{:016X}", cr3);
+        core::ptr::write(0x7010 as *mut u64, cr3);
+        info!("Writing kernel stack base...");
+        core::ptr::write(0x7020 as *mut u64, 0xFFFFFF8000000000);
+        info!("Writing kernel stack size per core...");
+        core::ptr::write( 0x7030 as *mut u64, 128);
+        info!("Resetting core lottery...");
+        core::ptr::write( 0x7030 as *mut u64, 128);
+
+        info!("Writing GDT size...: {}", len_gdt-1);
+        core::ptr::write(0x7052 as *mut u16, (len_gdt-1) as u16);
+        info!("Writing GDT addr...:");
+        core::ptr::write(0x7054 as *mut u32, 0x9000);
+    }
+
+    info!("Sending ISS sequence...");
+    interrupt::wakeup_all_ap();
 }
 
 static mut CONFIG: Config = Config {

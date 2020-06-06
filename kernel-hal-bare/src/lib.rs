@@ -16,6 +16,8 @@
 #![no_std]
 #![feature(asm)]
 #![feature(linkage)]
+#![feature(global_asm)]
+#![feature(llvm_asm)]
 #![deny(warnings)]
 
 #[macro_use]
@@ -216,6 +218,14 @@ pub fn init(config: Config) {
         trapframe::init();
     }
     arch::init(config);
+}
+
+/// Initialize HAL for AP
+pub fn init_ap() {
+    unsafe {
+        trapframe::init();
+    }
+    arch::init_ap();
 }
 
 #[cfg(test)]

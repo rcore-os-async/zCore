@@ -25,6 +25,7 @@ use zircon_loader::{run_userboot, Images};
 #[no_mangle]
 pub extern "C" fn _start(boot_info: &BootInfo) -> ! {
     logging::init(get_log_level(boot_info.cmdline));
+    error!("Core log initialized.");
     memory::init_heap();
     memory::init_frame_allocator(boot_info);
     #[cfg(feature = "graphic")]
@@ -53,10 +54,26 @@ fn main(zbi_data: &[u8], cmdline: &str) {
         zbi: zbi_data,
     };
     let _proc = run_userboot(&images, cmdline);
+
+    kernel_hal_bare::start_aps();
+    info!("Entering executor loop in BSP");
+    loop {}
+    // executor::run();
+}
+
+#[no_mangle]
+pub extern "C" fn _ap_start() -> ! {
+    ap_main();
+}
+
+fn ap_main() -> ! {
+    error!("AP up!");
+    kernel_hal_bare::init_ap();
     executor::run();
 }
 
-fn get_log_level(cmdline: &str) -> &str {
+fn get_log_level(_cmdline: &str) -> &str {
+    /*
     for opt in cmdline.split(':') {
         // parse 'key=value'
         let mut iter = opt.trim().splitn(2, '=');
@@ -66,7 +83,8 @@ fn get_log_level(cmdline: &str) -> &str {
             return value;
         }
     }
-    ""
+    */
+    "info"
 }
 
 #[cfg(feature = "graphic")]

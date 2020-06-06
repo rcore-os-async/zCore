@@ -79,6 +79,14 @@ pub fn irq_remove_handle(irq: u8) -> bool {
     }
 }
 
+pub fn wakeup_all_ap() {
+    info!("Waking up all APs...");
+    use super::{phys_to_virt, LocalApic, XApic, LAPIC_ADDR};
+    let mut lapic = unsafe { XApic::new(phys_to_virt(LAPIC_ADDR)) };
+    // FIXME: Wake up all other cores
+    unsafe { lapic.start_ap(1, 0x5000) };
+}
+
 fn breakpoint() {
     panic!("\nEXCEPTION: Breakpoint");
 }
